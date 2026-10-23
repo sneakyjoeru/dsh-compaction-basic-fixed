@@ -1,0 +1,11 @@
+{
+  "name": "dsh-compaction-threshold",
+  "version": "1.0.0",
+  "description": "User-editable compaction trigger for the DeepSeek Harness: compact at N% of the routed model's context window, globally and per provider/model (volatile settings + the compactionThreshold service).",
+  "type": "module",
+  "main": "index.mjs",
+  "license": "MIT",
+  "engines": {
+    "dsh": ">=0.2.1-rc.2"
+  }
+}

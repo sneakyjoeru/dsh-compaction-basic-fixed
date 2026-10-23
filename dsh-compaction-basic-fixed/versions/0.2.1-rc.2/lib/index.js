@@ -14,7 +14,7 @@ import { SessionSeq } from "@deepseek-ai/dsh-session";
 /** Default request-pressure fraction for every routed model. */
 const DEFAULT_THRESHOLD_RATIO = .8;
 /** Default verbatim-tail fraction for every routed model. */
-const DEFAULT_RETAIN_RATIO = .2;
+const DEFAULT_RETAIN_RATIO = .16;
 /** Fields shared by top-level defaults and exact-target overrides. */
 const POLICY_CONFIG_KEYS = [
 	"thresholdRatio",
@@ -60,10 +60,8 @@ function resolveConfig(config = {}) {
 	validateKeys(config, BASIC_COMPACT_CONFIG_KEYS, "BasicCompactionConfig");
 	validatePolicy(config, "BasicCompactionConfig");
 	if (config.auto !== void 0 && typeof config.auto !== "boolean") throw new Error("BasicCompactionConfig: auto must be a boolean");
-	// Default policy: compaction starts at 80% of the routed model's context window with no
-	// extra headroom, so the trigger is floor(min(0.8 * W, W - O)) - "compact at 80%".
-	const headroomTokens = config.headroomTokens ?? 0;
-	const maxTokens = config.maxTokens ?? 4096;
+	const headroomTokens = config.headroomTokens ?? 65536;
+	const maxTokens = config.maxTokens ?? headroomTokens;
 	assertPositiveInteger("BasicCompactionConfig.maxTokens (explicit or from headroomTokens)", maxTokens);
 	const thresholdRatio = config.thresholdRatio ?? DEFAULT_THRESHOLD_RATIO;
 	const retention = resolveRetention(config, { retainRatio: DEFAULT_RETAIN_RATIO });

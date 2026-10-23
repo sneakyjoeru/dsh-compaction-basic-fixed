@@ -1,118 +1,73 @@
-# dsh-compaction-basic-fixed
+# dsh compaction kit — compact at N% of the model's context window, upgrade-proof
 
-Compaction (condensation) backend for the **DeepSeek Harness (dsh)** web — a fixed copy of the
-shipped `@deepseek-ai/dsh-compaction-basic` **0.2.1-rc.2**, re-defaulted so **compaction starts at
-exactly 80% of the context window** with zero extra headroom, and carrying three long-session fixes
-from live operation.
+Three pieces for the **DeepSeek Harness (dsh)** web, taken from a production NAS deployment:
 
-[Русский — описание и установка](README.ru.md)
+| Piece | What it does |
+|---|---|
+| [`dsh-compaction-basic-fixed/`](dsh-compaction-basic-fixed/README.md) | Compaction backend. **Stable loader**: loads the re-based copy matching the installed `dsh-compaction-basic` (three long-session fixes), or falls back to the shipped package — compaction never goes dead after a dsh upgrade. Overlays the live threshold setting. |
+| [`dsh-compaction-threshold/`](dsh-compaction-threshold/README.md) | The setting: *compact at **N %** of the routed model's context window* — default **80**, decimals allowed, global **and per provider/model**. Live, no restart. |
+| [`patches/meter-compaction-percent.py`](patches/meter-compaction-percent.py) | Optional UI patch for the context-meter popup: text field `Compact at [ 80 ] %`, trigger shown in tokens for the routed model, checkbox `only for <model>`. Ring/percentage read 100 % at the trigger. Non-fatal on anchor drift. |
 
-## What it does
+[Русский — установка](README.ru.md)
 
-As token pressure builds, dsh compaction condenses the oldest history into one structured summary
-message, keeps the recent tail verbatim, and retries the request after a confirmed context-overflow
-error. With `dsh-command-compact` mounted, `/compact` condenses on demand; with
-`dsh-compaction-tool-result-pruner` mounted, oversized tool outputs are trimmed first (no model
-call needed when the trim alone suffices).
+## Why
 
-### Defaults in this package — "compact at 80%"
+- Upstream `dsh-compaction-basic` reserves 65,536 headroom tokens by default, so on a 131k window it
+  compacts at ~47 %, not 80 %. Here the trigger is `floor(min(ratio · W, W − O))` with ratio from the
+  setting and `W` the window of the model that is **actually routed** — a percentage, never a token count.
+- Long sessions tripped three upstream guards (routed-token-only tail walk, dense-content walk
+  exhaustion, estimated-vs-routed size guard) and re-summarised on every step — fixed in the copies.
+- A copy of a shipped package is pinned to one dsh version; dsh's preflight disabled the row after a
+  bump (measured 2026-10-23). The loader removes that failure mode (`engines.dsh` open range + runtime
+  version gate + shipped fallback + one provenance line in the log).
 
-| Setting | Default here | Shipped default |
-|---|---|---|
-| `thresholdRatio` | `0.8` | `0.8` |
-| `headroomTokens` | `0` | `65536` |
-| `retainRatio` | `0.2` | `0.16` |
-| `maxTokens` | `4096` | follows headroom (`65536`) |
+## Install — desktop (native dsh)
 
-Trigger = `floor(min(0.8 · W, W − O))` where `W` is the routed model's context window and `O` the
-request output cap. The shipped 65,536-token headroom makes the effective trigger land far below
-80% on large windows (≈47% on a 131k window); with headroom `0` the trigger lands exactly at
-80% and the worst-case request size is `0.8·W + O`.
-
-All settings remain overridable (globally or per route via `modelPolicies`); every field works
-unchanged here — only the defaults moved.
-
-## Local fixes (marked `LOCAL OVERRIDE` in `lib/index.js`)
-
-1. **Retained-tail walk** — the shipped walk priced the retained tail with *routed* tokens only.
-   With sparse routed attribution (tool results, splices, images) the compactable span collapsed to
-   a sliver and the size guard rejected every attempt. This copy takes the larger of routed and
-   heuristic tokens per node.
-2. **Dense-content fallback** — the meter's chars-per-token heuristic underprices dense tool
-   output, so the `retainTokens` walk could consume the *entire* surface and return no range until
-   the real prompt overflowed. This copy keeps the last two surface nodes verbatim (retreating to a
-   balanced tool boundary) so a threshold crossing always yields a compactable range.
-3. **Size guard** — the shipped guard compared the framed summary's *estimated* size against the
-   shadowed span's *routed* size; in long sessions the routed count collapses and the guard
-   rejected everything (measured: 93 wasted attempts in 59 minutes). This copy compares against the
-   larger of the two measures.
-
-## Install
-
-### Desktop (native dsh install)
-
-1. Clone into dsh's plugins directory (`$DSH_HOME` is dsh's home dir — check `dsh --help`;
-   typically `~/.dsh`):
+1. Clone next to your dsh home and link bare imports to dsh's own packages:
 
    ```sh
-   git clone https://github.com/sneakyjoeru/dsh-compaction-basic-fixed \
-     "$DSH_HOME/plugins/dsh-compaction-basic"
+   git clone https://github.com/sneakyjoeru/dsh-compaction-basic-fixed "$DSH_HOME/plugins/dsh-compaction"
+   cd "$DSH_HOME/plugins/dsh-compaction"
+   DSH_NM="$(dirname "$(node -p 'require.resolve("@deepseek-ai/dsh/package.json")')")/node_modules"
+   ln -sfn "$DSH_NM" dsh-compaction-basic-fixed/node_modules
+   ln -sfn "$DSH_NM" dsh-compaction-threshold/node_modules
+   node dsh-compaction-basic-fixed/verify.mjs      # ALL PASS
    ```
 
-2. Mount it in the user-profile config
-   `$DSH_HOME/profiles/<profile>/cordis.patch.yml` — replace the shipped `compaction-basic`
-   entry with a file-URL mount (**absolute path required**):
+2. `$DSH_HOME/profiles/<profile>/cordis.patch.yml` (absolute paths):
 
    ```yaml
+   # host plane — the setting
+   - insert:
+       - id: compaction-threshold
+         name: /ABS/PATH/plugins/dsh-compaction/dsh-compaction-threshold/index.mjs
+   # preset plane — inside your agent preset's `compaction` group (a host-plane
+   # compaction-basic row is dead config on the stock `standard` preset)
    - id: compaction-basic
-     name: /absolute/path/to/plugins/dsh-compaction-basic/lib/index.js
+     name: /ABS/PATH/plugins/dsh-compaction/dsh-compaction-basic-fixed/index.mjs
+     config: { thresholdRatio: 0.8, retainRatio: 0.2, headroomTokens: 0, maxTokens: 4096 }
    ```
 
-   On the stock `standard` preset the entry lives in the preset's `compaction` group (preset plane);
-   mounting it in the host plane alone is dead config there.
+3. Optional popup UI: `python3 patches/meter-compaction-percent.py` against the installed
+   `dsh-client-ui-conversation/lib/client.js` (it locates it under `/usr/local/lib` by default).
+   Re-run after every dsh upgrade; it skips with a loud line if upstream moved.
+4. Restart dsh. Log must show `compaction-basic-fixed: fixed copy ...` and no `entries did not activate`.
 
-3. Restart dsh. In the boot log there must be **no** `entries did not activate` line for the
-   compaction entry.
+## Install — remote server (dsh in Docker, e.g. a NAS)
 
-### Remote server (dsh in a Docker container, e.g. a NAS)
+1. Put the clone inside the container's `$DSH_HOME` (the persistent volume), symlink `node_modules`
+   to `/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules` (same path in every image).
+2. Same two mounts in `profiles/web/cordis.patch.yml`.
+3. Apply the UI patch in your **Dockerfile** (`COPY patches/meter-compaction-percent.py /opt/nas-patches/`
+   + `RUN python3 /opt/nas-patches/meter-compaction-percent.py`) so it survives rebuilds.
+4. Recreate the container (`docker compose up -d --force-recreate dsh-web`); never hot-patch a running one.
+5. Verify: `docker logs dsh-web 2>&1 | grep -E "compaction-basic-fixed:|did not activate"`, open a chat,
+   click the context ring — the popup shows the editor.
 
-1. Get the code inside the container's `$DSH_HOME` (on a UGREEN NAS stack
-   `/volume1/docker/dsh`, that is `/volume1/docker/dsh/home` — `exec` into `dsh-web` or clone from
-   a host that shares the volume):
+## After a dsh upgrade
 
-   ```sh
-   git clone https://github.com/sneakyjoeru/dsh-compaction-basic-fixed \
-     "$DSH_HOME/plugins/dsh-compaction-basic"
-   ```
+Nothing to do for compaction to keep working. To get the long-session fixes back on the new version:
+copy the newly shipped `dsh-compaction-basic` into `dsh-compaction-basic-fixed/versions/<version>/`,
+re-apply the three `LOCAL OVERRIDE` hunks, run `verify.mjs`, restart.
 
-2. Add the same file-URL mount line to `$DSH_HOME/profiles/web/cordis.patch.yml`.
-3. Recreate the container — do not hot-patch a running instance:
-
-   ```sh
-   docker compose up -d --force-recreate dsh-web   # or your dsh-upgrade.sh
-   ```
-
-   Active sessions drop on the recreate; reload the page once the log says `ONLINE`.
-4. Verify: `docker logs dsh-web 2>&1 | grep -c "entries did not activate"` is `0`; the browser
-   context meter reads 100% at the 80%-of-window barrier and compaction fires there; `/compact`
-   works.
-
-### Alternative: package install
-
-```sh
-cd dsh-compaction-basic && npm pack
-dsh plugin --profile web add file:$PWD/dsh-compaction-basic-0.2.1-rc.2.tgz
-```
-
-Then add the file-URL mount line above so the local copy (with the 80% defaults and the three
-fixes) is the one actually mounted.
-
-## Re-basing after a dsh upgrade
-
-The package is pinned to the 0.2.1-rc.2 peer set (`@deepseek-ai/dsh-*` at that version). After each
-dsh bump: diff this `lib/index.js` against the newly shipped `dsh-compaction-basic` and re-apply the
-three `LOCAL OVERRIDE` hunks — the upstream file is otherwise the source of truth.
-
-## License
-
-MIT (copy of the shipped package, same terms).
+MIT. The `versions/*` copies keep the upstream package's MIT terms.

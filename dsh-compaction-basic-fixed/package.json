@@ -1,0 +1,14 @@
+{
+  "name": "dsh-compaction-basic-fixed",
+  "version": "1.0.0",
+  "description": "Stable loader for the DeepSeek Harness compaction backend: picks the re-based long-session copy matching the installed dsh-compaction-basic, falls back to the shipped package otherwise, and overlays the live compaction-threshold setting (compact at N% of the model's context window).",
+  "type": "module",
+  "main": "index.mjs",
+  "license": "MIT",
+  "engines": {
+    "dsh": ">=0.2.1-rc.2"
+  },
+  "dsh": {
+    "compatibilityNote": "engines.dsh decides alone (dsh-app-boot evaluatePluginCompatibility); the version-pinned peerDependencies live in versions/<v>/package.json and are gated by index.mjs at import time, never by the preflight."
+  }
+}
