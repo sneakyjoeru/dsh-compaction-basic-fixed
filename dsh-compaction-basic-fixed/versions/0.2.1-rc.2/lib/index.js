@@ -240,6 +240,9 @@ const SUMMARY_CLOSE_TAG = "</compacted-summary>";
 * front of it makes the auxiliary call a genuine prefix of the last routed
 * request, so the provider's KV cache is reused instead of invalidated.
 */
+const MAX_COMPACTION_INPUT_RETRIES = 4;
+const COMPACTION_INPUT_REDUCTION_RATIO = 0.25;
+
 const COMPACTION_INSTRUCTION = [
 	"You are now acting as a compaction engine for this AI coding assistant. Condense the conversation ABOVE into a structured checkpoint that lets another model resume the work with no loss of essential context.",
 	"",
@@ -591,6 +594,7 @@ function prepareCompaction(dependencies, session, selection) {
 /** Run the summarizer and frame its replacement checkpoint. */
 async function summarizeCompaction(dependencies, prepared, agent, compactionId, sourceCommandId, assertStable, signal) {
 	let summaryResult;
+	let inputRetries = 0;
 	for (;;) {
 		signal?.throwIfAborted();
 		try {
@@ -599,6 +603,15 @@ async function summarizeCompaction(dependencies, prepared, agent, compactionId, 
 		} catch (error) {
 			if (signal?.aborted === true) throw error;
 			assertStable(dependencies, agent.session, prepared);
+			if (isContextOverflow(error) && inputRetries < MAX_COMPACTION_INPUT_RETRIES) {
+				const reduced = reduceCompactionInput(prepared.input);
+				if (reduced !== null) {
+					inputRetries += 1;
+					prepared = { ...prepared, input: reduced };
+					dependencies.logger?.warn?.(`compaction summarizer prompt exceeded model context; retry ${inputRetries}/${MAX_COMPACTION_INPUT_RETRIES} with an older history slice omitted`);
+					continue;
+				}
+			}
 			if (!dependencies.recover(error, agent, prepared.shadowedSeqs, signal)) throw error;
 			prepared = prepareCompaction(dependencies, agent.session, validateSurfaceRegion(agent.session, prepared.start, prepared.end));
 		}
@@ -714,6 +727,55 @@ function buildSummarizationInput(session, shadowedSeqs) {
 	return {
 		...header?.tools === void 0 ? {} : { tools: header.tools },
 		messages: system === null ? regionMessages : [system, ...regionMessages]
+	};
+}
+/** True only for an explicit provider context-window rejection. */
+export function isContextOverflow(error) {
+	if (error?.code === CONTEXT_WINDOW_EXCEEDED_CODE || error?.code === "CONTEXT_WINDOW_EXCEEDED") return true;
+	const text = error instanceof Error ? `${error.message} ${error.cause?.message ?? ""}` : String(error);
+	return /maximum context length|context window exceeded|input_tokens.*(?:context|maximum)|prompt.*too long/i.test(text);
+}
+/**
+ * Drop the oldest quarter of complete summarizer messages, keeping the system prefix,
+ * the most recent half, and balanced tool-call/result blocks. This is used only after
+ * the provider has confirmed that the full summarization replay exceeds its hard window.
+ */
+export function reduceCompactionInput(input) {
+	const messages = input.messages;
+	const systemIndex = messages[0]?.role === "system" ? 0 : -1;
+	const firstDroppable = systemIndex === 0 ? 1 : 0;
+	const droppableCount = messages.length - firstDroppable;
+	if (droppableCount < 8) return null;
+	const latestUserIndex = messages.map((message, index) => message?.role === "user" ? index : -1).filter((index) => index >= firstDroppable).at(-1) ?? -1;
+	const requiredStart = latestUserIndex >= firstDroppable ? latestUserIndex : firstDroppable;
+	const dropCount = Math.max(1, Math.ceil(droppableCount * COMPACTION_INPUT_REDUCTION_RATIO));
+	let keepFrom = Math.min(messages.length - 2, Math.max(requiredStart, firstDroppable + dropCount));
+	while (keepFrom < messages.length - 1 && messages[keepFrom]?.role === "tool") keepFrom += 1;
+	// If this boundary starts inside an assistant tool call, advance through the paired
+	// results, never replaying orphan tool results as the beginning of the retained tail.
+	while (keepFrom < messages.length - 1 && messages[keepFrom]?.role === "assistant" && Array.isArray(messages[keepFrom]?.toolCalls) && messages[keepFrom].toolCalls.length > 0) {
+		const callIds = new Set(messages[keepFrom].toolCalls.map((call) => call.id));
+		let next = keepFrom + 1;
+		while (next < messages.length && messages[next]?.role === "tool" && callIds.has(messages[next]?.toolCallId)) next += 1;
+		if (next === keepFrom + 1) break;
+		keepFrom = next;
+	}
+	const removed = messages.slice(firstDroppable, keepFrom);
+	if (removed.length === 0 || keepFrom >= messages.length) return null;
+	const retained = messages.slice(keepFrom);
+	const latestUser = [...messages.slice(firstDroppable)].reverse().find((message) => message?.role === "user");
+	const retainedHasLatestUser = latestUser !== undefined && retained.includes(latestUser);
+	return {
+		...input,
+		messages: [
+			...(systemIndex === 0 ? [messages[0]] : []),
+			{
+				role: "user",
+				content: [{ type: "text", text: `[Earlier portion of the selected history omitted after the summarizer hit the model context limit; ${removed.length} older messages were dropped. Preserve the current task state.]` }],
+			},
+			...(!retainedHasLatestUser && latestUser !== undefined ? [latestUser] : []),
+			...retained,
+		],
 	};
 }
 /** Inspect open-turn, unmatched-compaction, and latest seed-boundary state independently. */

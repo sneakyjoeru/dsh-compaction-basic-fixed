@@ -6,6 +6,7 @@
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import * as mod from "./index.mjs";
+import { isContextOverflow, reduceCompactionInput } from "./versions/0.2.1-rc.2/lib/index.js";
 import { resolveThreshold, normalizePercent } from "../dsh-compaction-threshold/index.mjs";
 
 const require = createRequire(import.meta.url);
@@ -52,5 +53,25 @@ assert.equal(Object.fromEntries(out.modelPolicies.map((p) => [p.model, p])).m.re
 out = mod.overlayThreshold(base, {});
 assert.equal(out.thresholdRatio, 0.8);
 assert.equal(out.modelPolicies.length, 1);
+
+// 6. provider-confirmed context overflow retries can be narrowed, without losing system/latest request.
+assert.equal(isContextOverflow({ code: "CONTEXT_WINDOW_EXCEEDED" }), true);
+assert.equal(isContextOverflow(new Error("This model maximum context length is 160000")), true);
+assert.equal(isContextOverflow(new Error("connection reset")), false);
+const system = { role: "system", content: "SYS" };
+const latest = { role: "user", content: "LATEST USER GOAL" };
+const pairedCall = { role: "assistant", toolCalls: [{ id: "pair-1", name: "test" }], content: "call" };
+const pairedResult = { role: "tool", toolCallId: "pair-1", content: "result" };
+const messages = [system, ...Array.from({ length: 16 }, (_, index) => ({ role: "tool", toolCallId: `t${index}`, content: `bulky-tool-output-${index}` })), pairedCall, pairedResult, latest, { role: "assistant", content: "tail" }];
+const tools = [{ name: "test" }];
+const reduced = reduceCompactionInput({ messages, tools });
+assert.ok(reduced, "long replay is reducible");
+assert.equal(reduced.messages[0], system, "system prefix retained");
+assert.ok(reduced.messages.includes(latest), "latest user goal retained");
+assert.equal(reduced.messages.at(-1).content, "tail", "latest assistant tail retained");
+assert.equal(reduced.tools, tools, "tool schemas preserved");
+assert.ok(reduced.messages.length < messages.length, "replay became smaller");
+assert.equal(reduced.messages.some((message) => message === pairedCall), reduced.messages.some((message) => message === pairedResult), "tool call/result pair is not split");
+assert.equal(reduceCompactionInput({ messages: [system, latest] }), null, "do not reduce a short history");
 
 console.log("ALL PASS");
